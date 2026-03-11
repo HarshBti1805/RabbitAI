@@ -1,0 +1,1 @@
+WRN 2026-03-11T18:24:04.827 ?.165718   server_start:199: Failed to start server: operation not permitted: /run/user/1000/nvim.165718.0
