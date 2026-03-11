@@ -1,29 +1,18 @@
-"""Send the generated summary to the recipient via SMTP."""
+"""Send emails via Gmail SMTP (port 465) with Resend fallback."""
 
 import smtplib
 import logging
-
+import requests
 import markdown as md
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-def send_email(to_address: str, summary_markdown: str) -> None:
-    """Send an HTML email containing the sales summary."""
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Your AI-Generated Sales Insight Brief"
-    msg["From"] = settings.EMAIL_FROM or settings.SMTP_USER
-    msg["To"] = to_address
-
-    # Plain-text fallback
-    msg.attach(MIMEText(summary_markdown, "plain", "utf-8"))
-
-    # Rich HTML version
-    html_body = f"""\
+def _build_html(summary_markdown: str) -> str:
+    return f"""\
 <html>
 <head>
 <style>
@@ -34,7 +23,6 @@ def send_email(to_address: str, summary_markdown: str) -> None:
   table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
   th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
   th {{ background: #0f3460; color: #fff; }}
-  tr:nth-child(even) {{ background: #f8f9fa; }}
   .footer {{ margin-top: 32px; font-size: 12px; color: #888;
              border-top: 1px solid #eee; padding-top: 12px; }}
 </style>
@@ -46,15 +34,58 @@ def send_email(to_address: str, summary_markdown: str) -> None:
 </div>
 </body>
 </html>"""
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    logger.info("Sending email to %s via %s:%s", to_address, settings.SMTP_HOST, settings.SMTP_PORT)
 
-    with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
+def _send_via_smtp(to_address: str, summary_markdown: str) -> None:
+    """Send via Gmail SMTP over SSL (port 465)."""
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "Your AI-Generated Sales Insight Brief"
+    msg["From"] = settings.EMAIL_FROM or settings.SMTP_USER
+    msg["To"] = to_address
+    msg.attach(MIMEText(summary_markdown, "plain", "utf-8"))
+    msg.attach(MIMEText(_build_html(summary_markdown), "html", "utf-8"))
+
+    with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT) as server:
         server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
         server.sendmail(msg["From"], to_address, msg.as_string())
 
-    logger.info("Email sent successfully to %s", to_address)
+    logger.info("Email sent via SMTP to %s", to_address)
+
+
+def _send_via_resend(to_address: str, summary_markdown: str) -> None:
+    """Fallback: send via Resend HTTP API."""
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "from": settings.EMAIL_FROM or "onboarding@resend.dev",
+            "to": [to_address],
+            "subject": "Your AI-Generated Sales Insight Brief",
+            "html": _build_html(summary_markdown),
+            "text": summary_markdown,
+        },
+    )
+    if response.status_code not in (200, 201):
+        raise Exception(f"Resend failed: {response.text}")
+    logger.info("Email sent via Resend to %s", to_address)
+
+
+def send_email(to_address: str, summary_markdown: str) -> None:
+    """Try SMTP first, fall back to Resend if SMTP is blocked."""
+    # Try SMTP if credentials are configured
+    if settings.SMTP_USER and settings.SMTP_PASSWORD:
+        try:
+            _send_via_smtp(to_address, summary_markdown)
+            return
+        except Exception as e:
+            logger.warning("SMTP failed (%s), trying Resend...", e)
+
+    # Fallback to Resend
+    if settings.RESEND_API_KEY:
+        _send_via_resend(to_address, summary_markdown)
+        return
+
+    raise Exception("No email provider configured. Set SMTP or RESEND credentials.")
